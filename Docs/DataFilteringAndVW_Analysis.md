@@ -10,6 +10,7 @@
 2. [极值与垃圾股剔除：仙股与微盘股](#2-极值与垃圾股剔除仙股与微盘股)
 3. [行业剔除：金融与公用事业](#3-行业剔除金融与公用事业)
 4. [VW（市值加权）的底层逻辑](#4-vw市值加权的底层逻辑)
+5. [替代组合变体（Alternative Portfolios）的生成逻辑](#5-替代组合变体alternative-portfolios的生成逻辑)
 
 ---
 
@@ -333,6 +334,109 @@ if (passive_gain){
 # 对于 NYSE/AMEX (exchcd == 1 or 2) 的退市：缺失退市收益默认为 -35%
 # 对于 NASDAQ (exchcd == 3) 的退市：缺失退市收益默认为 -55%
 # 退市收益被合并到月度收益中：ret = (1+ret)*(1+dlret)-1
+```
+
+---
+
+## 5. 替代组合变体（Alternative Portfolios）的生成逻辑
+
+除了基线组合（`PredictorPortsFull.csv`，由 `20_PredictorPorts.R` 生成）之外，`30_PredictorAltPorts.R` 脚本统一生成了一系列**替代组合变体**，涵盖不同的分位排序方式、加权方式和流动性筛选。
+
+### 5.1 核心机制
+
+所有变体都通过同一个 `loop_over_strategies()` 函数生成（定义在 `01_PortfolioFunction.R`），只是传入不同的参数覆盖了 `SignalDoc.csv` 中的默认配置。
+
+**文件**: `Portfolios/Code/30_PredictorAltPorts.R`
+
+关键参数：
+- **`q_cut`**：分位排序的切分比例。`q_cut = 0.1` → 十分位（Decile，10 组）；`q_cut = 0.2` → 五分位（Quintile，5 组）
+- **`sweight`**：股票权重方式。`'VW'` → 市值加权；`'EW'` → 等权；省略则使用 `SignalDoc.csv` 中原始论文的设定（"OP stock weighting"）
+- **`strategylistcts`**：仅包含 `Cat.Form == 'continuous'`（连续型信号）的信号列表，因为分位排序仅适用于连续型信号
+
+### 5.2 十分位（Decile）组合
+
+**文件**: `Portfolios/Code/30_PredictorAltPorts.R`，第 99–128 行
+
+```r
+strategylistcts = strategylist0 %>% filter(Cat.Form == 'continuous')
+
+# Deciles: 使用原始论文的加权方式（OP stock weighting）
+port <- loop_over_strategies(
+  strategylistcts %>% mutate(q_cut = 0.1)
+)
+writestandard(port, pathDataPortfolios, "PredictorAltPorts_Deciles.csv")
+
+# DecilesVW: 强制使用市值加权
+port <- loop_over_strategies(
+  strategylistcts %>% mutate(q_cut = 0.1, sweight = 'VW')
+)
+writestandard(port, pathDataPortfolios, "PredictorAltPorts_DecilesVW.csv")
+
+# DecilesEW: 强制使用等权加权
+port <- loop_over_strategies(
+  strategylistcts %>% mutate(q_cut = 0.1, sweight = 'EW')
+)
+writestandard(port, pathDataPortfolios, "PredictorAltPorts_DecilesEW.csv")
+```
+
+### 5.3 五分位（Quintile）组合 — `PredictorAltPorts_QuintilesVW` 的来源
+
+**文件**: `Portfolios/Code/30_PredictorAltPorts.R`，第 132–153 行
+
+```r
+## QUINTILE SORTS
+
+# Quintiles: 使用原始论文的加权方式
+port <- loop_over_strategies(
+  strategylistcts %>% mutate(q_cut = 0.2)
+)
+writestandard(port, pathDataPortfolios, "PredictorAltPorts_Quintiles.csv")
+
+# QuintilesVW: 强制使用市值加权 ★
+port <- loop_over_strategies(
+  strategylistcts %>% mutate(q_cut = 0.2, sweight = 'VW')
+)
+writestandard(port, pathDataPortfolios, "PredictorAltPorts_QuintilesVW.csv")
+
+# QuintilesEW: 强制使用等权加权
+port <- loop_over_strategies(
+  strategylistcts %>% mutate(q_cut = 0.2, sweight = 'EW')
+)
+writestandard(port, pathDataPortfolios, "PredictorAltPorts_QuintilesEW.csv")
+```
+
+**`PredictorAltPorts_QuintilesVW`** 的含义：与 `PredictorAltPorts_Deciles` 和 `PredictorAltPorts_DecilesVW` 类似，但使用**五分位**排序（`q_cut = 0.2`，将股票分为 5 组），并**强制所有信号使用市值加权**（`sweight = 'VW'`），覆盖了 `SignalDoc.csv` 中各信号原始论文的加权方式。
+
+### 5.4 其他替代组合
+
+`30_PredictorAltPorts.R` 还生成了以下变体：
+
+| 输出文件名 | 变化维度 | 代码行 |
+|---|---|---|
+| `PredictorAltPorts_HoldPer_{1,3,6,12}.csv` | 不同持有期（1/3/6/12 个月） | 第 20–40 行 |
+| `PredictorAltPorts_LiqScreen_ME_gt_NYSE20pct.csv` | 剔除 NYSE 第 20 百分位以下微盘股 | 第 50–57 行 |
+| `PredictorAltPorts_LiqScreen_Price_gt_5.csv` | 剔除价格 ≤ $5 的股票 | 第 62–68 行 |
+| `PredictorAltPorts_LiqScreen_NYSEonly.csv` | 仅保留 NYSE 股票 | 第 74–81 行 |
+| `PredictorAltPorts_LiqScreen_VWforce.csv` | 强制所有信号使用 VW（不改变分位数） | 第 87–94 行 |
+| `PredictorAltPorts_Deciles.csv` | 十分位，原始论文加权 | 第 104–110 行 |
+| `PredictorAltPorts_DecilesVW.csv` | 十分位，强制 VW | 第 113–119 行 |
+| `PredictorAltPorts_DecilesEW.csv` | 十分位，强制 EW | 第 122–128 行 |
+| `PredictorAltPorts_Quintiles.csv` | 五分位，原始论文加权 | 第 135–139 行 |
+| **`PredictorAltPorts_QuintilesVW.csv`** | **五分位，强制 VW** | **第 142–146 行** |
+| `PredictorAltPorts_QuintilesEW.csv` | 五分位，强制 EW | 第 149–153 行 |
+
+此外，`32_Predictor2x3Ports.R` 还生成了 Fama-French 1993 风格的 2×3 组合（`PredictorAltPorts_FF93style.csv`）。
+
+### 5.5 数据打包与输出
+
+这些替代组合在 `Shipping/Code/2_pack_portfolios_and_results.r` 中被打包输出：
+
+```r
+write_indiv('PredictorAltPorts_LiqScreen_VWforce.csv', 'Original_CutsVW')
+write_indiv('PredictorAltPorts_Deciles.csv', 'Cts_Deciles')
+write_indiv('PredictorAltPorts_Quintiles.csv', 'Cts_Quintiles')
+write_indiv('PredictorAltPorts_DecilesVW.csv', 'Cts_DecilesVW')
+write_indiv('PredictorAltPorts_QuintilesVW.csv', 'Cts_QuintilesVW')
 ```
 
 ---
