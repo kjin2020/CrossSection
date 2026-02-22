@@ -11,6 +11,7 @@
 3. [行业剔除：金融与公用事业](#3-行业剔除金融与公用事业)
 4. [VW（市值加权）的底层逻辑](#4-vw市值加权的底层逻辑)
 5. [替代组合变体（Alternative Portfolios）的生成逻辑](#5-替代组合变体alternative-portfolios的生成逻辑)
+6. [`QuintilesVW` 端到端调用链详解](#6-quintilesvw-端到端调用链详解)
 
 ---
 
@@ -438,6 +439,250 @@ write_indiv('PredictorAltPorts_Quintiles.csv', 'Cts_Quintiles')
 write_indiv('PredictorAltPorts_DecilesVW.csv', 'Cts_DecilesVW')
 write_indiv('PredictorAltPorts_QuintilesVW.csv', 'Cts_QuintilesVW')
 ```
+
+---
+
+## 6. `QuintilesVW` 端到端调用链详解
+
+本节逐步追踪下面这一行代码的完整执行路径，解释它是如何工作的：
+
+```r
+# Portfolios/Code/30_PredictorAltPorts.R, 第 142–146 行
+port <- loop_over_strategies(
+  strategylistcts %>% mutate(q_cut = 0.2, sweight = 'VW')
+)
+```
+
+### 6.1 第一步：准备策略列表（`strategylistcts %>% mutate(...)`）
+
+**发生位置**: `Portfolios/Code/30_PredictorAltPorts.R`，第 101 行 + 第 143 行
+
+```r
+# 第 101 行：从 SignalDoc.csv 中筛选出所有连续型信号
+strategylistcts = strategylist0 %>% filter(Cat.Form == 'continuous')
+
+# 第 143 行：mutate 覆盖两个关键列
+strategylistcts %>% mutate(q_cut = 0.2, sweight = 'VW')
+```
+
+**作用**：`strategylistcts` 是一个 data.frame（数据表），每行代表一个信号（如 BM、Size、Mom12m 等），列包含该信号的所有配置参数（来自 `SignalDoc.csv`）。`mutate()` 将**所有行**的 `q_cut` 列覆盖为 `0.2`，`sweight` 列覆盖为 `'VW'`，从而让所有信号统一使用五分位排序和市值加权，而非各自原始论文的设定。
+
+其他列（如 `Sign`、`startmonth`、`portperiod`、`q_filt`、`filterstr`）**保持不变**，仍然使用 `SignalDoc.csv` 中原始论文的配置。
+
+### 6.2 第二步：循环遍历所有信号（`loop_over_strategies()`）
+
+**发生位置**: `Portfolios/Code/00_SettingsAndTools.R`，第 408–503 行
+
+```r
+loop_over_strategies = function(strategylist, ...){
+    Nstrat = dim(strategylist)[1]       # 信号总数（例如 ~200 个连续型信号）
+    allport = list()
+
+    for (i in seq(1, Nstrat)){
+        # 对每个信号调用 signalname_to_ports()，传入该行的所有参数
+        tempport = signalname_to_ports(
+            signalname = strategylist$signalname[i]     # 例如 "BM"
+          , Cat.Form   = strategylist$Cat.Form[i]       # "continuous"
+          , q_cut      = strategylist$q_cut[i]          # 0.2 ← 被 mutate 覆盖
+          , sweight    = strategylist$sweight[i]         # "VW" ← 被 mutate 覆盖
+          , Sign       = strategylist$Sign[i]            # 1 或 -1（来自 SignalDoc.csv）
+          , startmonth = strategylist$startmonth[i]      # 来自 SignalDoc.csv
+          , portperiod = strategylist$portperiod[i]      # 来自 SignalDoc.csv
+          , q_filt     = strategylist$q_filt[i]          # 来自 SignalDoc.csv（如 "NYSE"）
+          , filterstr  = strategylist$filterstr[i]       # 来自 SignalDoc.csv（如 "abs(prc)>5"）
+        )
+        allport[[i]] = tempport
+    }
+
+    allport = do.call(rbind.data.frame, allport)        # 合并所有信号的结果
+    return(allport)
+}
+```
+
+**作用**：这是一个简单的循环框架。它逐个遍历策略列表中的每个信号，将该信号的参数传递给核心函数 `signalname_to_ports()`，并将所有结果合并为一个大的 data.frame 返回。
+
+### 6.3 第三步：单信号的组合构建（`signalname_to_ports()`）
+
+**发生位置**: `Portfolios/Code/01_PortfolioFunction.R`，第 65–355 行
+
+这个函数是整个组合构建的核心。对于 QuintilesVW 的场景（以信号 "BM" 为例），其执行流程如下：
+
+#### 6.3.1 参数设定
+
+```r
+# 01_PortfolioFunction.R, 第 86–93 行
+# 参数 sweight = 'VW' 和 q_cut = 0.2 是从 loop_over_strategies 传入的
+# 其他参数使用 SignalDoc.csv 中的值，或以下默认值：
+if (is.na(sweight)) {sweight = 'EW'}       # 此处不会触发，因为 sweight = 'VW'
+if (is.na(q_cut)) {q_cut = 0.2}            # 此处不会触发，因为 q_cut = 0.2
+if (is.na(startmonth)) {startmonth = 6}    # 来自 SignalDoc.csv 或默认 6 月
+if (is.na(portperiod)) {portperiod = 1}    # 来自 SignalDoc.csv 或默认 1 个月
+```
+
+#### 6.3.2 导入信号数据（`import_signal()`）
+
+```r
+# 01_PortfolioFunction.R, 第 195 行
+signal = import_signal(signalname, filterstr, Sign)
+```
+
+内部逻辑（第 6–58 行）：
+1. 从 `Signals/pyData/Predictors/{signalname}.csv` 读取信号 CSV（例如 `BM.csv`，含 `[permno, yyyymm, BM]`）
+2. 与 `crspinfo`（含 `[permno, yyyymm, prc, exchcd, me, shrcd]`）做 `left_join`，补上股票特征
+3. 如果 `filterstr` 非 NA（例如 `"abs(prc)>5"`），执行 `signal %>% filter(abs(prc)>5)` 剔除低价股
+4. 将信号值乘以 `Sign`（1 或 -1），统一方向
+
+#### 6.3.3 分位排序 — 分配组合编号（`single_sort()`）
+
+```r
+# 01_PortfolioFunction.R, 第 201–202 行
+if (Cat.Form == 'continuous'){
+  signal = single_sort(q_filt, q_cut)      # q_cut = 0.2 → 五分位排序
+}
+```
+
+`single_sort()` 的内部逻辑（第 120–189 行）：
+
+**步骤 A — 选择断点样本**：
+```r
+# 第 123–128 行
+tempbreak = signal
+if (!is.na(q_filt)) {
+  if (q_filt == 'NYSE'){
+    tempbreak = tempbreak %>% filter(exchcd == 1)   # 仅用 NYSE 股票计算断点
+  }
+}
+```
+
+**步骤 B — 计算分位数断点**：
+```r
+# 第 131–136 行
+# q_cut = 0.2 → plist = c(0.2, 0.4, 0.6, 0.8)  → 4 个断点，5 个组
+if (q_cut <= 1/3){
+  plist = c(seq(q_cut, 1-2*q_cut, q_cut), 1-q_cut)  # = c(0.2, 0.4, 0.6, 0.8)
+}
+```
+
+对每个月 `yyyymm`，根据 `plist` 计算信号值的 20%、40%、60%、80% 分位数作为断点。
+
+**步骤 C — 分配组合编号**：
+```r
+# 第 163–184 行
+# signal ≤ break1 (20th pct) → port = 1
+# break1 < signal < break2 (40th pct) → port = 2
+# break2 < signal < break3 (60th pct) → port = 3
+# break3 < signal < break4 (80th pct) → port = 4
+# signal ≥ break4 (80th pct) → port = 5
+```
+
+结果：每只股票在每个月被分配到 port 1–5（五分位组合编号）。
+
+#### 6.3.4 信号滞后（防止前视偏差）
+
+```r
+# 01_PortfolioFunction.R, 第 249–256 行
+signallag = setDT(signal)[
+  , .(permno, yyyymm, signal, port)
+][
+  , yyyymm := yyyymm + 1                                          # 月份 +1
+][
+  , yyyymm := if_else(yyyymm %% 100 == 13, yyyymm+100-12, yyyymm) # 跨年处理
+]
+```
+
+**作用**：将 t 月的组合分配（`port`）推后到 t+1 月，确保不使用未来信息。即 t 月的信号值决定了 t+1 月的组合归属。
+
+#### 6.3.5 VW 权重赋值 ★
+
+```r
+# 01_PortfolioFunction.R, 第 269–270 行
+if (sweight == 'VW'){
+  crspret$weight = crspret$melag           # ★ 权重 = t-1 期滞后市值
+}
+```
+
+**作用**：因为 `sweight = 'VW'`（由 `mutate(sweight = 'VW')` 强制设定），每只股票的权重被设为 `melag`（即 t-1 月末的市值，`me_{t-1} = |prc_{t-1}| × shrout_{t-1}`）。
+
+#### 6.3.6 计算组合收益率
+
+```r
+# 01_PortfolioFunction.R, 第 281–290 行
+port = crspret[
+  !is.na(port) & !is.na(ret) & !is.na(weight)
+][
+  , .(
+    ret = weighted.mean(ret, weight)        # ★ VW 组合收益 = Σ(ret_i × melag_i) / Σ(melag_i)
+    , signallag = weighted.mean(signallag, weight)
+    , Nlong = .N                            # 组合内股票数量
+  )
+  , by = list(port, date)                   # 按 (组合编号, 日期) 分组
+]
+```
+
+**作用**：对于每个组合（port 1–5）在每个月，用 `melag` 作为权重计算加权平均收益率。这是标准的市值加权公式：
+
+$$R_{p,t}^{VW} = \frac{\sum_{i \in p} \text{melag}_{i,t} \times r_{i,t}}{\sum_{i \in p} \text{melag}_{i,t}}$$
+
+其中 $\text{melag}_{i,t} = \text{me}_{i,t-1}$，即 t-1 月末的市值。
+
+#### 6.3.7 构建多空组合（Long-Short）
+
+```r
+# 01_PortfolioFunction.R, 第 306–338 行
+# port = 5 (最高信号) 为多头
+# port = 1 (最低信号) 为空头
+# LS 收益 = mean(多头组合收益) - mean(空头组合收益)
+longshort = inner_join(long, short, by='date') %>%
+  mutate(ret = retL + retS, port = 'LS')
+```
+
+### 6.4 完整调用链总结
+
+```
+30_PredictorAltPorts.R
+  │
+  │  strategylistcts %>% mutate(q_cut = 0.2, sweight = 'VW')
+  │  → 覆盖所有信号的 q_cut=0.2 和 sweight='VW'
+  │
+  ▼
+loop_over_strategies()                    [00_SettingsAndTools.R: 408-503]
+  │
+  │  for 每个信号 i in 1..N:
+  │    传入: signalname, Cat.Form, q_cut=0.2, sweight='VW', Sign, ...
+  │
+  ▼
+signalname_to_ports()                     [01_PortfolioFunction.R: 65-355]
+  │
+  ├─ import_signal()                      [第 6-58 行]
+  │    读取信号 CSV → 合并 CRSP 信息 → 应用 filterstr → 应用 Sign
+  │
+  ├─ single_sort(q_filt, q_cut=0.2)       [第 120-189 行]
+  │    计算 20/40/60/80 分位数断点 → 分配 port 1-5
+  │
+  ├─ 信号滞后 (yyyymm + 1)               [第 249-256 行]
+  │    t 月信号 → t+1 月组合归属（防止前视偏差）
+  │
+  ├─ VW 权重赋值                          [第 269-270 行]
+  │    weight = melag（t-1 期市值）
+  │
+  ├─ 加权平均收益                         [第 281-290 行]
+  │    ret = weighted.mean(ret, melag)    按 (port, date) 分组
+  │
+  └─ 多空组合                             [第 306-338 行]
+       LS = 多头(port=5) - 空头(port=1)
+```
+
+### 6.5 与其他变体的关键差异
+
+| 变体 | `q_cut` | `sweight` | 分组数 | 权重 |
+|---|---|---|---|---|
+| **Quintiles** | 0.2 | 原始论文设定 | 5 | 各信号不同 |
+| **QuintilesVW** ★ | 0.2 | `'VW'`（强制） | 5 | 全部用 melag |
+| **QuintilesEW** | 0.2 | `'EW'`（强制） | 5 | 全部等权 (1) |
+| **Deciles** | 0.1 | 原始论文设定 | 10 | 各信号不同 |
+| **DecilesVW** | 0.1 | `'VW'`（强制） | 10 | 全部用 melag |
+
+唯一的区别在于传入 `mutate()` 的参数值——`q_cut` 控制组数，`sweight` 控制加权方式。所有其他逻辑（断点计算、信号滞后、收益率计算）完全相同。
 
 ---
 
