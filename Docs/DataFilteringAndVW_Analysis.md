@@ -43,7 +43,7 @@ df = df[(df['shrcd'].isin([10, 11, 12])) & (df['exchcd'].isin([1, 2, 3]))].copy(
 ```r
 # For NYSE subset, compute signal quantiles for high and low
 nysebreaks = signaljune %>%
-  filter(exchcd == 1, shrcd %in% c(10, 11)) %>%   # NYSE 普通股用于计算分位点
+  filter(exchcd == 1, shrcd %in% c(10, 11)) %>%   # 仅 NYSE 且 shrcd 10/11（比信号阶段更严格，排除了 shrcd 12）
   group_by(yyyymm) %>%
   summarise(
     qsignal_l = quantile(signal, 0.3, na.rm = T)
@@ -227,7 +227,7 @@ templag <- crspm %>%
   select(permno, yyyymm, me) %>%
   mutate(
     yyyymm = yyyymm + 1,                                              # 月份 +1
-    yyyymm = if_else(yyyymm %% 100 == 13, yyyymm + 100 - 12, yyyymm) # 处理跨年
+    yyyymm = if_else(yyyymm %% 100 == 13, yyyymm + 100 - 12, yyyymm) # 处理 12 月→1 月的跨年
   ) %>%
   transmute(permno, yyyymm, melag = me)   # melag = 上月的 me
 ```
