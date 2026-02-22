@@ -12,6 +12,7 @@
 4. [VW（市值加权）的底层逻辑](#4-vw市值加权的底层逻辑)
 5. [替代组合变体（Alternative Portfolios）的生成逻辑](#5-替代组合变体alternative-portfolios的生成逻辑)
 6. [`QuintilesVW` 端到端调用链详解](#6-quintilesvw-端到端调用链详解)
+7. [安慰剂组合（PlaceboPortsFull）的生成逻辑](#7-安慰剂组合placeboportsfull的生成逻辑)
 
 ---
 
@@ -686,6 +687,175 @@ signalname_to_ports()                     [01_PortfolioFunction.R: 65-355]
 
 ---
 
+## 7. 安慰剂组合（PlaceboPortsFull）的生成逻辑
+
+### 7.1 核心结论
+
+**PlaceboPortsFull 绝大多数信号使用的是等权（EW）加权和五分位（Quintile）排序。** 具体来说：
+
+- **114 个安慰剂信号中**，88 个在 `SignalDoc.csv` 中 `Stock Weight` 列为空（默认为 EW），22 个显式标记为 EW，**仅 4 个为 VW**
+- **114 个安慰剂信号中**，101 个在 `SignalDoc.csv` 中 `LS Quantile` 列为空（默认为 0.2，即五分位），其余指定了 0.2、0.25、0.33、0.4 或 0.5
+- **因此 PlaceboPortsFull 以等权五分位排序为主**，而非市值加权
+
+### 7.2 代码追踪
+
+#### 7.2.1 `40_PlaceboPorts.R` — 入口
+
+**文件**: `Portfolios/Code/40_PlaceboPorts.R`，第 18–33 行
+
+```r
+# 第 18 行：从 SignalDoc.csv 中筛选出所有 Placebo 信号
+strategylist0 <- alldocumentation %>% filter(Cat.Signal == "Placebo")
+strategylist0 <- ifquickrun()
+
+# 第 25-27 行：直接调用 loop_over_strategies()，未做任何 mutate 覆盖
+portmonth <- loop_over_strategies(
+  strategylist0                    # ← 直接传入，不覆盖任何参数
+)
+
+# 第 30-34 行：输出
+writestandard(portmonth, pathDataPortfolios, "PlaceboPortsFull.csv")
+```
+
+**关键区别**：与 `30_PredictorAltPorts.R` 中生成 QuintilesVW 时使用 `mutate(q_cut = 0.2, sweight = 'VW')` 覆盖参数不同，`40_PlaceboPorts.R` **不覆盖任何参数**。因此每个安慰剂信号使用的是 `SignalDoc.csv` 中各自的配置。
+
+#### 7.2.2 参数来源 — `SignalDoc.csv` 中的 Placebo 配置
+
+`SignalDoc.csv` 中的 114 个 Placebo 信号配置统计：
+
+| 参数 | 值 | 信号数量 | 说明 |
+|---|---|---|---|
+| **Stock Weight** | 空（→默认 EW） | 88 | 未指定，使用 `signalname_to_ports()` 默认值 |
+| **Stock Weight** | `EW` | 22 | 显式等权 |
+| **Stock Weight** | `VW` | 4 | 显式市值加权（仅 BetaBDLeverage 等 4 个） |
+| | | **合计 110 个 EW** | 88（默认）+ 22（显式）= 110 个信号使用等权 |
+| **LS Quantile** | 空（→默认 0.2） | 101 | 未指定，使用默认五分位 |
+| **LS Quantile** | `0.2` | 8 | 显式五分位 |
+| **LS Quantile** | 其他 | 5 | 个别信号使用 0.25/0.33/0.4/0.5 |
+| **Cat.Form** | `continuous` | 112 | 连续型信号 |
+| **Cat.Form** | `discrete` | 2 | 离散型信号 |
+
+#### 7.2.3 默认值机制 — `signalname_to_ports()`
+
+当 `SignalDoc.csv` 中某列为空时，`loop_over_strategies()` 会将 NA 传入 `signalname_to_ports()`，后者使用以下默认值：
+
+**文件**: `Portfolios/Code/01_PortfolioFunction.R`，第 86–93 行
+
+```r
+if (is.na(sweight)) {sweight = 'EW'}       # ★ 默认等权（非 VW）
+if (is.na(Sign)) {Sign = 1}
+if (is.na(longportname[1])) {longportname = 'max'}
+if (is.na(shortportname[1])) {shortportname = 'min'}
+if (is.na(startmonth)) {startmonth = 6}
+if (is.na(portperiod)) {portperiod = 1}
+if (is.na(q_cut)) {q_cut = 0.2}            # ★ 默认五分位（0.2）
+if (is.na(Cat.Form)) {Cat.Form = 'continuous'}
+```
+
+因此，对于 88 个 `Stock Weight` 为空的安慰剂信号，`sweight` 默认为 `'EW'`（等权），权重为 1：
+
+```r
+# 01_PortfolioFunction.R, 第 269-273 行
+if (sweight == 'VW'){
+  crspret$weight = crspret$melag       # 仅 VW 信号走这条路
+} else {
+  crspret$weight = 1                   # ★ EW：所有股票权重 = 1
+}
+```
+
+对于 101 个 `LS Quantile` 为空的安慰剂信号，`q_cut` 默认为 `0.2`（五分位，分 5 组）。
+
+### 7.3 完整数据流
+
+```
+SignalDoc.csv (Cat.Signal == "Placebo")
+  │
+  │  114 个安慰剂信号，大多数: Stock Weight = 空, LS Quantile = 空
+  │
+  ▼
+40_PlaceboPorts.R
+  │  strategylist0 <- alldocumentation %>% filter(Cat.Signal == "Placebo")
+  │  portmonth <- loop_over_strategies(strategylist0)   ← 不覆盖参数
+  │
+  ▼
+loop_over_strategies()                    [00_SettingsAndTools.R]
+  │  for 每个信号:
+  │    signalname_to_ports(sweight = NA, q_cut = NA, ...)
+  │
+  ▼
+signalname_to_ports()                     [01_PortfolioFunction.R]
+  │
+  ├─ sweight = NA → 默认 'EW' → weight = 1       （88/114 个信号）
+  │  sweight = 'EW' → weight = 1                   （22/114 个信号）
+  │  sweight = 'VW' → weight = melag               （4/114 个信号）
+  │
+  ├─ q_cut = NA → 默认 0.2 → 五分位排序           （101/114 个信号）
+  │  q_cut = 0.2 → 五分位排序                      （8/114 个信号）
+  │  其他 q_cut → 对应分位排序                      （5/114 个信号）
+  │
+  ├─ single_sort(q_cut) → 分配 port 1-5
+  ├─ 信号滞后 (yyyymm + 1)
+  ├─ weighted.mean(ret, weight) → 计算组合收益
+  └─ 输出 LS (多空) + port 01-05
+  │
+  ▼
+PlaceboPortsFull.csv
+  → 每个信号的每月组合收益率（含 LS 和 port 01-05）
+```
+
+### 7.4 安慰剂信号的个股级别数据
+
+每个安慰剂信号的**个股级别数据**以 CSV 文件形式存储在 `Signals/pyData/Placebos/` 目录下：
+
+- 格式：`[permno, yyyymm, SignalName]`
+- 示例：`BetaSquared.csv` 包含 `[permno, yyyymm, BetaSquared]`
+- 对应 95 个 Python 生成脚本（部分脚本生成多个信号，如 `ZZ1_PM_ChPM.py` 同时生成 PM 和 ChPM），由 `Signals/pyCode/Placebos/` 下的 Python 脚本生成
+
+这些个股级别信号文件正是 `import_signal()` 函数读取的输入。每个文件包含了每只股票每月的信号值（firm-level characteristic），可以用于构建任何自定义的投资组合（包括市值加权版本）。
+
+### 7.5 生成市值加权安慰剂组合的可行性
+
+如果需要生成**市值加权版本**的安慰剂组合，有两种方法：
+
+#### 方法 A：修改 `40_PlaceboPorts.R`
+
+类似于 `30_PredictorAltPorts.R` 中生成 `PredictorAltPorts_QuintilesVW` 的模式，可以添加以下代码：
+
+```r
+# 在 40_PlaceboPorts.R 中添加（在现有 PlaceboPortsFull 输出之后）：
+
+# 筛选连续型安慰剂信号
+strategylistcts <- strategylist0 %>% filter(Cat.Form == 'continuous')
+
+# 生成 VW 版本（强制市值加权 + 五分位）
+portmonth_vw <- loop_over_strategies(
+  strategylistcts %>% mutate(q_cut = 0.2, sweight = 'VW')
+)
+
+writestandard(portmonth_vw, pathDataPortfolios, "PlaceboPortsFull_QuintilesVW.csv")
+```
+
+此方法利用已有的 `loop_over_strategies()` 框架，只需覆盖 `sweight = 'VW'`，即可使所有安慰剂信号统一使用 `melag`（t-1 期市值）作为权重。
+
+#### 方法 B：保持原始论文设定，仅覆盖权重
+
+如果想保留每个信号原始论文的分位排序设定（`q_cut`），仅将所有信号的权重从 EW 改为 VW：
+
+```r
+portmonth_vw <- loop_over_strategies(
+  strategylist0 %>% mutate(sweight = 'VW')      # 仅覆盖权重
+)
+
+writestandard(portmonth_vw, pathDataPortfolios, "PlaceboPortsFull_VW.csv")
+```
+
+两种方法都能工作，因为：
+1. 个股级别的信号文件由 95 个 Python 脚本生成，运行 `03_CreatePlacebos.py` 后存储在 `Signals/pyData/Placebos/` 目录（需先确认所有 114 个信号的 CSV 文件均已生成）
+2. `melag`（用于 VW 权重的滞后市值）已经在 `crspmret.fst` 中预计算好
+3. `signalname_to_ports()` 已经完全支持 VW 权重分支
+
+---
+
 ## 总结
 
 | 维度 | 结论 |
@@ -699,3 +869,4 @@ signalname_to_ports()                     [01_PortfolioFunction.R: 65-355]
 | **公用事业剔除** | ⚠️ 非全局，仅少数信号剔除 (SIC 4900–4999) |
 | **VW 权重** | ✅ **严格使用 t-1 期市值 (`melag`) 作为 t 期的权重** |
 | **退市收益** | ✅ 已处理，NYSE/AMEX 默认 -35%，NASDAQ 默认 -55% |
+| **PlaceboPortsFull** | ⚠️ **绝大多数为等权（EW）五分位排序**，仅 4/114 个信号使用 VW |
